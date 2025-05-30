@@ -30,8 +30,8 @@ wal_level = replica			# minimal, replica, or logical
 создаем раль на резервном узле: 
 ```bash 
 psql -h localhost -p 9787 -d postgres -c "CREATE ROLE backupuser WITH LOGIN PASSWORD 'backup_pass123';" 
-psql -h localhost -p 9787 -d postgres -c "GRANT CONNECT ON DATABASE longgreenmath TO backupuser;"
-psql -h localhost -p 9787 -d postgres -c "GRANT ALL PRIVILEGES ON DATABASE longgreenmath TO backupuser;"
+psql -h localhost -p 9787 -d postgres -c "GRANT CONNECT ON DATABASE somedb TO backupuser;"
+psql -h localhost -p 9787 -d postgres -c "GRANT ALL PRIVILEGES ON DATABASE somedb TO backupuser;"
 ```
 **создание директории для резервных копий **
 
@@ -182,27 +182,92 @@ bash $HOME/scripts/pg180/backup.sh >> $HOME/backup.log 2>&1
 создаем [скрипт](./script/pg186/restore.sh) `restore.sh` на резервном узле для восстановления БД
 
 ```bash
+#!/bin/bash
+# === Этап 2: Потеря основного узла ===
+set -euo pipefail
 
+NOW=$(date '+%Y-%m-%d_%H-%M-%S')
+RESERVE_DIR=~/backups
+RESTORE_DIR=~/tpz50
+LOG_FILE=~/restore.log
+exec >>"$LOG_FILE" 2>&1
+
+echo "[$NOW] ▶️  Старт восстановления"
+
+# 1. Останавливаем (если вдруг запущен)
+pg_ctl -D "$RESTORE_DIR" stop -m fast || echo "PostgreSQL не был запущен"
+
+# 2. Чистый каталог
+rm -rf "$RESTORE_DIR"
+mkdir -p "$RESTORE_DIR"
+
+# 3. Файлы архива
+BASE_TAR=$(ls -t "$RESERVE_DIR"/base.tar.gz | head -n 1)
+[[ -n "$BASE_TAR" ]] || { echo "❌ base.tar.gz не найден"; exit 1; }
+
+echo "▶️  Распаковка $BASE_TAR"
+tar --no-same-owner -xzf "$BASE_TAR" -C "$RESTORE_DIR"
+
+# 4. Дополнительные архивы
+[[ -f "$RESERVE_DIR/pg_wal.tar.gz" ]] && {
+  echo "▶️  Распаковка pg_wal.tar.gz"
+  mkdir -p "$RESTORE_DIR/pg_wal"
+  tar --no-same-owner -xzf "$RESERVE_DIR/pg_wal.tar.gz" -C "$RESTORE_DIR/pg_wal"
+}
+
+for TS_TAR in "$RESERVE_DIR"/*[0-9][0-9][0-9][0-9][0-9].tar.gz; do
+  [[ -e "$TS_TAR" ]] || break
+  echo "▶️  Распаковка tablespace $(basename "$TS_TAR")"
+  tar --no-same-owner -xzf "$TS_TAR" -C "$RESTORE_DIR"
+done
+
+# 5. Приводим права (без попытки сменить группу)
+chmod 700 "$RESTORE_DIR"
+
+# 6. (необязательно) свежие конфиги — если ключ доступа настроен
+scp -q postgres7@pg194:~/tpz50/{postgresql.conf,pg_hba.conf,pg_ident.conf} "$RESTORE_DIR/" \
+  || echo "⚠️  Конфиги не скопированы — берём из архива"
+
+# 7. Запуск PostgreSQL
+echo "▶️  Запуск PostgreSQL"
+pg_ctl -D "$RESTORE_DIR" start
+
+sleep 3
+echo "▶️  Проверка данных"
+psql -h localhost -p 9787 -U backupuser -d somedb -c "SELECT * FROM recovery_check;"
+
+echo "[$NOW] ✅ Восстановление завершено"
 ```
 
-копируем файлы .conf с основного узла и папку с табличными пространствами 
+результат:
 ```bash
-scp postgres0@pg180:$HOME/ckf15/postgresql.conf $HOME/ckf15/
-scp postgres0@pg180:$HOME/ckf15/pg_hba.conf $HOME/ckf15/
-scp postgres0@pg180:$HOME/ckf15/pg_ident.conf $HOME/ckf15/
+[postgres8@pg199 ~]$ bash ~/scripts/pg199/restore.sh
+(postgres7@pg194.cs.ifmo.ru) Password for postgres7@pg194.cs.ifmo.ru:
+(postgres7@pg194.cs.ifmo.ru) Password for postgres7@pg194.cs.ifmo.ru:
+(postgres7@pg194.cs.ifmo.ru) Password for postgres7@pg194.cs.ifmo.ru:
+Пароль пользователя backupuser: 
+[postgres8@pg199 ~]$ cat restore.log 
+[2025-05-30_12-19-57] ▶️  Старт восстановления
+pg_ctl: файл PID "/var/db/postgres8/tpz50/postmaster.pid" не существует
+Запущен ли сервер?
+PostgreSQL не был запущен
+▶️  Распаковка /var/db/postgres8/backups/base.tar.gz
+▶️  Распаковка pg_wal.tar.gz
+▶️  Распаковка tablespace 16388.tar.gz
+▶️  Запуск PostgreSQL
+ожидание запуска сервера....2025-05-30 12:20:15.112 MSK [13138] СООБЩЕНИЕ:  передача вывода в протокол процессу сбора протоколов
+2025-05-30 12:20:15.112 MSK [13138] ПОДСКАЗКА:  В дальнейшем протоколы будут выводиться в каталог "log".
+ готово
+сервер запущен
+▶️  Проверка данных
+ id |       note        
+----+-------------------
+  1 | backup successful
+  2 | recovery check
+  3 | final test
+(3 строки)
 
-scp -r postgres0@pg180:$HOME/het47/ $HOME/
-
+[2025-05-30_12-19-57] ✅ Восстановление завершено
+[postgres8@pg199 ~]$ 
 ```
-
-применим изменения 
-```bash 
-pg_ctl -D $HOME/ckf15 restart 
-```
-
-симулируем сбой, удалив директорию с табличным пространством 
-```bash
-    rm -rf $HOME/het47
-```
-
 #### проверка работоспособности
