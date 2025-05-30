@@ -270,4 +270,165 @@ PostgreSQL не был запущен
 [2025-05-30_12-19-57] ✅ Восстановление завершено
 [postgres8@pg199 ~]$ 
 ```
-#### проверка работоспособности
+#### этап 3
+напишим новой таблица 
+```bash
+psql -h localhost -p 9787 -U postgres7 -d somedb
+```
+```bash
+CREATE TABLE test_table (
+    id SERIAL PRIMARY KEY,
+    data TEXT
+);
+
+INSERT INTO test_table (data)
+VALUES 
+('row 1'), ('row 2'), ('row 3');
+```
+Сделайте новый бэкап с этой таблицей
+```bash
+bash ~/scripts/pg194/backup.sh
+```
+напишем file_corruption.sh :
+```bash
+#!/bin/bash
+# === Этап 3. Повреждение файлов БД и полное восстановление ===
+#     (вариант 555, primary pg194  →  reserve pg199)
+set -euo pipefail
+
+##############################################################################
+# ---- ПЕРАМЕТРЫ -------------------------------------------------------------
+PGDATA="$HOME/tpz50"            # каталог кластера на pg194
+TBS_OLD="$HOME/gcj98"           # старое табличное пространство
+TBS_NEW="$HOME/gcj98_new"       # новое место для TBS
+BACKUP_WORK="$HOME/backups/recovery_$(date +%Y-%m-%d_%H-%M-%S)"  # куда копируем архивы
+
+RESERVE_HOST="postgres8@pg199"
+REMOTE_BACKUPS="~/backups"      # на pg199 — здесь «валятся» *.tar.gz
+
+PORT=9787                       # порт кластера (задан в postgresql.conf)
+PGUSER=postgres7
+DBNAME=somedb
+TEST_TABLE=public.test_table    # любая таблица-«маяк»
+
+LOG_FILE="$HOME/file_corruption.log"
+##############################################################################
+
+exec >>"$LOG_FILE" 2>&1
+echo "========== $(date)  ЭТАП 3 START =========="
+
+################### 1. СИМУЛИРУЕМ СБОЙ #######################################
+echo "Удаляем каталoг табличного пространства: $TBS_OLD"
+rm -rf "$TBS_OLD" || true
+
+################### 2. ПРОВЕРКА РАБОТОСПОСОБНОСТИ ###########################
+echo "Пробуем перезапустить сервер (должно упасть)"
+pg_ctl -D "$PGDATA" restart && echo "⚠️  Неожиданно перезапустился" || echo "✅  Ошибка перезапуска — как и ожидалось"
+
+if psql -h localhost -p "$PORT" -U "$PGUSER" -d "$DBNAME" -c "SELECT 1;" >/dev/null 2>&1 ; then
+  echo "⚠️  Сессия всё ещё устанавливается — это странно"
+else
+  echo "✅  База недоступна — повреждение подтверждено"
+fi
+
+################### 3. ОСТАНАВЛИВАЕМ КЛАСТЕР ################################
+pg_ctl -D "$PGDATA" stop -m fast || true
+
+################### 4. КОПИРУЕМ АРХИВЫ С pg199 ##############################
+echo "Копируем *.tar.gz с $RESERVE_HOST:$REMOTE_BACKUPS → $BACKUP_WORK"
+mkdir -p "$BACKUP_WORK"
+scp "$RESERVE_HOST":"$REMOTE_BACKUPS"/*.tar.gz "$BACKUP_WORK/"
+
+# контроль наличия обязательно-минимального набора
+[ -f "$BACKUP_WORK/base.tar.gz" ] || { echo "❌  base.tar.gz не найден — бэкап повреждён"; exit 1; }
+
+################### 5. ГОТОВИМ КАТАЛОГИ #####################################
+mv "$PGDATA" "${PGDATA}_corrupted_$(date +%s)"
+mkdir -p "$PGDATA" && chmod 700 "$PGDATA"
+mkdir -p "$TBS_NEW" && chmod 700 "$TBS_NEW"
+
+################### 6. РАСПАКОВКА base.tar.gz ###############################
+echo "Распаковываем base.tar.gz"
+tar -xzf "$BACKUP_WORK/base.tar.gz" -C "$PGDATA" --no-same-owner
+
+echo "Распаковываем WAL (если есть)"
+if [ -f "$BACKUP_WORK/pg_wal.tar.gz" ]; then
+  mkdir -p "$PGDATA/pg_wal"
+  tar -xzf "$BACKUP_WORK/pg_wal.tar.gz" -C "$PGDATA/pg_wal" --no-same-owner
+fi
+
+echo "Пересоздаём pg_tblspc"
+mkdir -p "$PGDATA/pg_tblspc"
+rm -f "$PGDATA/pg_tblspc"/*
+
+################### 7. ТАБЛИЧНЫЕ ПРОСТРАНСТВА ###############################
+for TS_TAR in "$BACKUP_WORK"/[0-9][0-9][0-9][0-9][0-9].tar.gz; do
+    [ -f "$TS_TAR" ] || continue
+    OID=$(basename "$TS_TAR" .tar.gz)
+    echo "  • TBS OID=$OID  →  $TBS_NEW/$OID"
+    mkdir -p "$TBS_NEW/$OID"
+    tar -xzf "$TS_TAR" -C "$TBS_NEW/$OID" --no-same-owner
+    ln -sfn "$TBS_NEW/$OID" "$PGDATA/pg_tblspc/$OID"
+done
+
+################### 8. ЗАПУСК КЛАСТЕРА #######################################
+echo "Запускаем восстановленный кластер"
+pg_ctl -D "$PGDATA" start
+sleep 3
+
+################### 9. КОНТРОЛЬНЫЙ ЗАПРОС ###################################
+echo "Контрольная выборка из $TEST_TABLE"
+psql -h localhost -p "$PORT" -U "$PGUSER" -d "$DBNAME" \
+     -c "SELECT count(*) AS rows_after_recovery FROM $TEST_TABLE;"
+
+echo "✅  Восстановление успешно завершено"
+echo "========== $(date)  ЭТАП 3 END =========="
+```
+запустим и прверям :
+```bash
+[postgres7@pg194 ~]$ bash ~/scripts/pg194/file_corruption.sh
+[postgres7@pg194 ~]$ tail -n 40 ~/file_corruption.log   
+========== пятница, 30 мая 2025 г. 12:54:31 (MSK)  ЭТАП 3 START ==========
+Удаляем каталoг табличного пространства: /var/db/postgres7/gcj98
+Пробуем перезапустить сервер (должно упасть)
+ожидание завершения работы сервера.... готово
+сервер остановлен
+ожидание запуска сервера....2025-05-30 12:54:32.153 MSK [17253] СООБЩЕНИЕ:  передача вывода в протокол процессу сбора протоколов
+2025-05-30 12:54:32.153 MSK [17253] ПОДСКАЗКА:  В дальнейшем протоколы будут выводиться в каталог "log".
+ готово
+сервер запущен
+⚠️  Неожиданно перезапустился
+⚠️  Сессия всё ещё устанавливается — это странно
+ожидание завершения работы сервера.... готово
+сервер остановлен
+Копируем *.tar.gz с postgres8@pg199:~/backups → /var/db/postgres7/backups/recovery_2025-05-30_12-54-31
+Распаковываем base.tar.gz
+Распаковываем WAL (если есть)
+Пересоздаём pg_tblspc
+  • TBS OID=16388  →  /var/db/postgres7/gcj98_new/16388
+Запускаем восстановленный кластер
+ожидание запуска сервера....2025-05-30 12:54:35.144 MSK [17288] СООБЩЕНИЕ:  передача вывода в протокол процессу сбора протоколов
+2025-05-30 12:54:35.144 MSK [17288] ПОДСКАЗКА:  В дальнейшем протоколы будут выводиться в каталог "log".
+ готово
+сервер запущен
+Контрольная выборка из public.test_table
+ rows_after_recovery 
+---------------------
+                   3
+(1 строка)
+
+✅  Восстановление успешно завершено
+========== пятница, 30 мая 2025 г. 12:54:38 (MSK)  ЭТАП 3 END ==========
+[postgres7@pg194 ~]$ psql -h localhost -p 9787 -U postgres7 -d somedb -c "SELECT count(*) FROM public.test_table;"
+ count 
+-------
+     3
+(1 строка)
+
+[postgres7@pg194 ~]$ ls -l ~/tpz50/pg_tblspc/
+total 1
+lrwxr-xr-x  1 postgres7 postgres 33 30 мая   12:54 16388 -> /var/db/postgres7/gcj98_new/16388
+[postgres7@pg194 ~]$ 
+```
+
+
