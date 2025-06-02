@@ -75,7 +75,7 @@ mkdir -p "$LOCAL_BACKUP_DIR"
 echo "Запуск pg_basebackup"
 PGPASSWORD="backup_pass123" pg_basebackup \
   -h 127.0.0.1 -p 9787 -U backupuser \
-  -D "$LOCAL_BACKUP_DIR" -F tar -z -P
+  -D "$LOCAL_BACKUP_DIR" -F tar -z -P  -X stream
 
 # --- копируем на резервный узел ---
 echo "Создание каталога на резервном узле"
