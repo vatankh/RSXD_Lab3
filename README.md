@@ -499,6 +499,10 @@ while read -r FULL_TABLE; do
 done 
 
 
+# 3. Generate a logical dump (custom format) on the RESERVE host
+ssh "$RESERVE_HOST" \
+  "pg_dump -Fc -h $HOST -p $PORT -U $DB_USER -d $DB_NAME \
+           -f $REMOTE_BACKUP_DIR/$DUMP_REMOTE"
 
 ###############################################################################
 # 2. Simulate a logical failure – scramble one FK column
@@ -517,11 +521,11 @@ psql -h "$HOST" -p "$PORT" -U "$DB_USER" -d "$DB_NAME" -c \
 ###############################################################################
 # 3. Generate a logical dump (custom format) on the RESERVE host
 ###############################################################################
-echo "→ Taking pg_dump -Fc on reserve host pg199 …"
 
-ssh "$RESERVE_HOST" \
-  "pg_dump -Fc -h $HOST -p $PORT -U $DB_USER -d $DB_NAME \
-           -f $REMOTE_BACKUP_DIR/$DUMP_REMOTE"
+
+
+
+
 
 ###############################################################################
 # 4. Copy the dump back to the primary
@@ -546,15 +550,16 @@ psql -h "$HOST" -p "$PORT" -U "$DB_USER" -d "$DB_NAME" -c "
   SELECT 'broken fkeys'        AS check,
          COUNT(*)              AS rows
   FROM   $TABLE_WITH_FK t
-  WHERE  NOT EXISTS (SELECT 1
+  WHERE  t.$FK_COLUMN IS NOT NULL
+    AND  NOT EXISTS (SELECT 1
                      FROM test_schema.related_table r
-                     WHERE r.id = t.$FK_COLUMN);" 
+                     WHERE r.id = t.$FK_COLUMN);"
 
-echo "[$TIMESTAMP]  ✅  Step 4 completed successfully"
+echo \"[$TIMESTAMP]  ✅  Step 4 completed successfully\" 
 ```
 запуским и проверям:
 ```bash
-[postgres7@pg194 ~]$ bash scripts/pg194/logical_corruption.sh 
+[postgres7@pg194 ~]$  bash scripts/pg194/logical_corruption.sh 
 + HOST=127.0.0.1
 + PORT=9787
 + DB_USER=postgres7
@@ -563,22 +568,22 @@ echo "[$TIMESTAMP]  ✅  Step 4 completed successfully"
 + REMOTE_BACKUP_DIR='~/backups'
 + LOCAL_BACKUP_DIR=/var/db/postgres7/backups
 ++ date +%Y-%m-%d_%H-%M-%S
-+ TIMESTAMP=2025-06-02_17-40-59
-+ DUMP_REMOTE=logical_backup_2025-06-02_17-40-59.dump
-+ DUMP_LOCAL=/var/db/postgres7/backups/logical_backup_2025-06-02_17-40-59.dump
++ TIMESTAMP=2025-06-02_19-59-45
++ DUMP_REMOTE=logical_backup_2025-06-02_19-59-45.dump
++ DUMP_LOCAL=/var/db/postgres7/backups/logical_backup_2025-06-02_19-59-45.dump
 + LOG_FILE=/var/db/postgres7/logical_recovery.log
 + exec
-[postgres7@pg194 ~]$ tail -f ~/logical_recovery.log
-  WHERE  NOT EXISTS (SELECT 1
+[postgres7@pg194 ~]$  tail -f ~/logical_recovery.log
+    AND  NOT EXISTS (SELECT 1
                      FROM test_schema.related_table r
                      WHERE r.id = t.related_id);'
     check     | rows 
 --------------+------
- broken fkeys |    3
+ broken fkeys |    0
 (1 строка)
 
-+ echo '[2025-06-02_17-40-59]  ✅  Step 4 completed successfully'
-[2025-06-02_17-40-59]  ✅  Step 4 completed successfully
++ echo '"[2025-06-02_19-59-45]' ✅ Step 4 completed 'successfully"'
+"[2025-06-02_19-59-45] ✅ Step 4 completed successfully"
 ```
 ؛
 ك
