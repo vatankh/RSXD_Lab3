@@ -1,4 +1,4 @@
-# Лабораторная работа №3 по АСУБД
+# Лабораторная работа №3 
 
 ## Этап 1. Резервное копирование 
 
@@ -16,7 +16,7 @@ Last login: Thu May 29 23:04:33 2025 from 192.168.11.194
 [postgres8@pg199 ~]$ 
 ```
 
-добавим параметр в `$HOME/ckf15/postgres.conf` для хранения WAL-файлов в составе полной копии
+добавим параметр в `$HOME/tpz50/postgres.conf` для хранения WAL-файлов в составе полной копии
 ```bash
 sed -i '' "s/#wal_level =.*/wal_level = replica/" $HOME/tpz50/postgresql.conf
 ```
@@ -34,20 +34,20 @@ psql -h localhost -p 9787 -d postgres -c "GRANT ALL PRIVILEGES ON DATABASE somed
 ```
 **создание директории для резервных копий **
 
-на основном узле `pg180`:
+на основном узле `pg194`:
 ```bash 
     mkdir -p $HOME/backups
 ```
 
-на резервном узле `pg186`:
+на резервном узле `pg199`:
 ```bash 
     mkdir -p $HOME/backups
 ```
 перезапускаем сервер 
 ```bash 
-    pg_ctl -D $HOME/ckf15 restart
+    pg_ctl -D $HOME/tpz50 restart
 ```
-создание [скрипта](./script/pg180/backup.sh) `backup.sh` для резервного копирования 
+создание `backup.sh` для резервного копирования 
 
 ```bash 
 #!/bin/bash
